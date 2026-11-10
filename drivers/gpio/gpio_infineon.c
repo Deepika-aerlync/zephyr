@@ -411,6 +411,62 @@ static int gpio_ifx_pin_get_config(const struct device *dev, gpio_pin_t pin,
 }
 #endif /* CONFIG_GPIO_GET_CONFIG */
 
+#ifdef CONFIG_GPIO_GET_DIRECTION
+static int gpio_ifx_port_get_direction(const struct device *dev, gpio_port_pins_t map,
+				       gpio_port_pins_t *inputs, gpio_port_pins_t *outputs)
+{
+	const struct gpio_ifx_config *cfg = dev->config;
+	GPIO_PRT_Type *base = cfg->regs;
+	gpio_port_pins_t in_mask = 0;
+	gpio_port_pins_t out_mask = 0;
+
+	map &= gpio_ifx_valid_mask(cfg->ngpios);
+
+	for (uint8_t pin = 0; pin < cfg->ngpios; pin++) {
+		if ((map & BIT(pin)) == 0) {
+			continue;
+		}
+
+		if ((uint32_t)Cy_GPIO_GetHSIOM(base, pin) != (uint32_t)HSIOM_SEL_GPIO) {
+			continue;
+		}
+
+		uint32_t dm = Cy_GPIO_GetDrivemode(base, pin);
+
+		switch (dm) {
+		case CY_GPIO_DM_HIGHZ:
+		case CY_GPIO_DM_PULLUP:
+		case CY_GPIO_DM_PULLDOWN:
+		case CY_GPIO_DM_PULLUP_DOWN:
+			in_mask |= BIT(pin);
+			break;
+		case CY_GPIO_DM_STRONG_IN_OFF:
+		case CY_GPIO_DM_OD_DRIVESLOW_IN_OFF:
+		case CY_GPIO_DM_OD_DRIVESHIGH_IN_OFF:
+			out_mask |= BIT(pin);
+			break;
+		case CY_GPIO_DM_STRONG:
+		case CY_GPIO_DM_OD_DRIVESLOW:
+		case CY_GPIO_DM_OD_DRIVESHIGH:
+			in_mask |= BIT(pin);
+			out_mask |= BIT(pin);
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (inputs != NULL) {
+		*inputs = in_mask;
+	}
+	if (outputs != NULL) {
+		*outputs = out_mask;
+	}
+
+	return 0;
+}
+#endif /* CONFIG_GPIO_GET_DIRECTION */
+
 static DEVICE_API(gpio, gpio_ifx_api) = {
 	.pin_configure = gpio_ifx_configure,
 	.port_get_raw = gpio_ifx_port_get_raw,
@@ -423,6 +479,9 @@ static DEVICE_API(gpio, gpio_ifx_api) = {
 	.get_pending_int = gpio_ifx_get_pending_int,
 #ifdef CONFIG_GPIO_GET_CONFIG
 	.pin_get_config = gpio_ifx_pin_get_config,
+#endif
+#ifdef CONFIG_GPIO_GET_DIRECTION
+	.port_get_direction = gpio_ifx_port_get_direction,
 #endif
 };
 
