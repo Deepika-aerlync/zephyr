@@ -125,6 +125,10 @@ struct ifx_cat1_rtc_data {
 		uint16_t mask;
 	} alarm[IFX_CAT1_RTC_ALARMS_COUNT];
 #endif
+#ifdef CONFIG_RTC_UPDATE
+	rtc_update_callback update_callback;
+	void *update_user_data;
+#endif
 };
 
 static inline uint16_t ifx_cat1_rtc_get_state(void)
@@ -206,6 +210,10 @@ static void ifx_cat1_rtc_isr_handler(const void *arg)
 	rtc_alarm_callback cb[IFX_CAT1_RTC_ALARMS_COUNT] = {0};
 	void *user_data[IFX_CAT1_RTC_ALARMS_COUNT] = {0};
 #endif
+#ifdef CONFIG_RTC_UPDATE
+	rtc_update_callback update_cb = NULL;
+	void *update_user_data = NULL;
+#endif
 
 	Cy_RTC_ClearInterrupt(status);
 
@@ -215,11 +223,24 @@ static void ifx_cat1_rtc_isr_handler(const void *arg)
 		ifx_cat1_rtc_century_interrupt();
 	}
 
+#ifdef CONFIG_RTC_UPDATE
+	if (status & CY_RTC_INTR_ALARM2) {
+		update_cb = data->update_callback;
+		update_user_data = data->update_user_data;
+	}
+#endif
+
 #ifdef CONFIG_RTC_ALARM
 	for (uint16_t id = 0; id < IFX_CAT1_RTC_ALARMS_COUNT; id++) {
 		if ((status & ifx_cat1_rtc_alarm_intr_bit(id)) == 0) {
 			continue;
 		}
+
+#ifdef CONFIG_RTC_UPDATE
+		if ((id == 1) && (data->update_callback != NULL)) {
+			continue;
+		}
+#endif
 
 		if (data->alarm[id].cb != NULL) {
 			cb[id] = data->alarm[id].cb;
@@ -231,6 +252,13 @@ static void ifx_cat1_rtc_isr_handler(const void *arg)
 #endif
 
 	k_spin_unlock(&data->lock, key);
+
+#ifdef CONFIG_RTC_UPDATE
+	/* Callbacks run outside the lock so they may re-enter the driver. */
+	if (update_cb != NULL) {
+		update_cb(dev, update_user_data);
+	}
+#endif
 
 #ifdef CONFIG_RTC_ALARM
 	/* Callbacks run outside the lock so they may re-enter the driver. */
@@ -534,6 +562,18 @@ static int ifx_cat1_alarm_set_time(const struct device *dev, uint16_t id, uint16
 		ifx_cat1_alarm_populate_cfg(&alarm_cfg, mask, timeptr);
 	}
 
+#ifdef CONFIG_RTC_UPDATE
+	if (id == 1) {
+		k_spinlock_key_t key = k_spin_lock(&data->lock);
+		bool busy = (data->update_callback != NULL);
+
+		k_spin_unlock(&data->lock, key);
+		if (busy) {
+			return -EBUSY;
+		}
+	}
+#endif
+
 	do {
 		if (retry != 0) {
 			IFX_CAT1_RTC_WAIT_ONE_MS();
@@ -639,6 +679,60 @@ static int ifx_cat1_alarm_set_callback(const struct device *dev, uint16_t id,
 }
 #endif /* CONFIG_RTC_ALARM */
 
+#ifdef CONFIG_RTC_UPDATE
+static int ifx_cat1_update_set_callback(const struct device *dev, rtc_update_callback callback,
+					void *user_data)
+{
+	struct ifx_cat1_rtc_data *data = dev->data;
+	cy_stc_rtc_alarm_t alarm_cfg = {
+		.dayOfWeek = CY_RTC_SUNDAY,
+		.date = 1,
+		.month = 1,
+		.almEn = (callback != NULL) ? CY_RTC_ALARM_ENABLE : CY_RTC_ALARM_DISABLE,
+	};
+	cy_en_rtc_status_t rslt;
+	uint32_t retry = 0;
+	k_spinlock_key_t key = k_spin_lock(&data->lock);
+
+#if defined(CONFIG_RTC_ALARM) && (IFX_CAT1_RTC_ALARMS_COUNT > 1)
+	if (data->alarm[1].mask != 0) {
+		k_spin_unlock(&data->lock, key);
+		return (callback != NULL) ? -EBUSY : 0;
+	}
+#endif
+
+	if (callback == NULL) {
+		Cy_RTC_SetInterruptMask(Cy_RTC_GetInterruptMask() & ~CY_RTC_INTR_ALARM2);
+		data->update_callback = NULL;
+		data->update_user_data = NULL;
+	}
+	k_spin_unlock(&data->lock, key);
+
+	do {
+		if (retry != 0) {
+			IFX_CAT1_RTC_WAIT_ONE_MS();
+		}
+		rslt = Cy_RTC_SetAlarmDateAndTime(&alarm_cfg, CY_RTC_ALARM_2);
+		++retry;
+	} while (rslt == CY_RTC_INVALID_STATE && retry < ifx_cat1_rtc_max_retry);
+
+	if (rslt != CY_RTC_SUCCESS) {
+		return -EIO;
+	}
+
+	if (callback != NULL) {
+		key = k_spin_lock(&data->lock);
+		data->update_callback = callback;
+		data->update_user_data = user_data;
+		Cy_RTC_ClearInterrupt(CY_RTC_INTR_ALARM2);
+		Cy_RTC_SetInterruptMask(Cy_RTC_GetInterruptMask() | CY_RTC_INTR_ALARM2);
+		k_spin_unlock(&data->lock, key);
+	}
+
+	return 0;
+}
+#endif /* CONFIG_RTC_UPDATE */
+
 static DEVICE_API(rtc, ifx_cat1_rtc_driver_api) = {
 	.set_time = ifx_cat1_rtc_set_time,
 	.get_time = ifx_cat1_rtc_get_time,
@@ -652,6 +746,9 @@ static DEVICE_API(rtc, ifx_cat1_rtc_driver_api) = {
 #ifdef CONFIG_RTC_CALIBRATION
 	.set_calibration = ifx_cat1_set_calibration,
 	.get_calibration = ifx_cat1_get_calibration,
+#endif
+#ifdef CONFIG_RTC_UPDATE
+	.update_set_callback = ifx_cat1_update_set_callback,
 #endif
 };
 
